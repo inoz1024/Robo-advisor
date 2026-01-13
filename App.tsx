@@ -12,7 +12,10 @@ import {
   ArrowRightLeft,
   Settings,
   X,
-  CreditCard
+  CreditCard,
+  ChevronLeft,
+  Calendar as CalendarIcon,
+  Search
 } from 'lucide-react';
 import { 
   XAxis, 
@@ -22,18 +25,25 @@ import {
   ResponsiveContainer, 
   AreaChart, 
   Area,
-  BarChart,
-  Bar
+  LineChart,
+  Line
 } from 'recharts';
 import { Transaction, TransactionType, Account } from './types';
 import { INCOME_CATEGORIES, EXPENSE_STRUCTURE } from './constants';
 import { getFinancialAdvice } from './services/geminiService';
 
+type ViewMode = 'main' | 'account-trend';
+type TimeRange = 'week' | 'month' | 'halfYear' | 'year';
+
 const App: React.FC = () => {
   // --- States ---
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [currentTab, setCurrentTab] = useState<'dashboard' | 'input' | 'history' | 'accounts'>('dashboard');
+  const [currentTab, setCurrentTab] = useState<'dashboard' | 'input' | 'records' | 'accounts'>('dashboard');
+  const [viewMode, setViewMode] = useState<ViewMode>('main');
+  const [trendAccountId, setTrendAccountId] = useState<string | null>(null);
+  const [trendRange, setTrendRange] = useState<TimeRange>('week');
+
   const [formType, setFormType] = useState<TransactionType>('expense');
   const [aiAdvice, setAiAdvice] = useState<string>('');
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -45,6 +55,11 @@ const App: React.FC = () => {
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
+
+  // Record Filter States
+  const [filterStartDate, setFilterStartDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [filterEndDate, setFilterEndDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [showFilter, setShowFilter] = useState(false);
 
   // Account Creation States
   const [isAddingAccount, setIsAddingAccount] = useState(false);
@@ -61,7 +76,6 @@ const App: React.FC = () => {
       setAccounts(parsedA);
       if (parsedA.length > 0) setSelectedAccountId(parsedA[0].id);
     } else {
-      // 若無帳戶，切換到帳戶管理引導使用者建立
       setCurrentTab('accounts');
     }
   }, []);
@@ -85,36 +99,81 @@ const App: React.FC = () => {
     return balances;
   }, [accounts, transactions]);
 
-  // Fix: Explicitly type the reduce parameters to avoid 'unknown' type errors (Error on line 88/77 context)
   const netAssets = Object.values(accountBalances).reduce((sum: number, b: number) => sum + b, 0);
 
-  const chartData = useMemo(() => {
+  // Filtered Transactions for "Real-time Records"
+  const filteredTransactions = useMemo(() => {
+    if (!showFilter) {
+      // Default: Only show today's
+      const today = new Date().toISOString().split('T')[0];
+      return transactions.filter(t => t.date === today).sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
+    }
+    return transactions.filter(t => t.date >= filterStartDate && t.date <= filterEndDate)
+                       .sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
+  }, [transactions, filterStartDate, filterEndDate, showFilter]);
+
+  // Chart Data for Total Dashboard
+  const mainChartData = useMemo(() => {
     const monthlyData: Record<string, { income: number; expense: number; totalAssets: number }> = {};
-    // 這裡為了簡化，圖表僅顯示總資產走勢
     const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
-    
-    // Fix: Explicitly type the reduce parameters to avoid 'unknown' type errors
     let runningTotal = accounts.reduce((sum: number, a: Account) => sum + Number(a.initialBalance), 0);
 
     sorted.forEach(t => {
       const month = t.date.substring(0, 7);
-      if (!monthlyData[month]) {
-        monthlyData[month] = { income: 0, expense: 0, totalAssets: 0 };
-      }
-      
-      const data = monthlyData[month];
+      if (!monthlyData[month]) monthlyData[month] = { income: 0, expense: 0, totalAssets: 0 };
       if (t.type === 'income') {
-        data.income += t.amount;
+        monthlyData[month].income += t.amount;
         runningTotal += t.amount;
       } else {
-        data.expense += t.amount;
+        monthlyData[month].expense += t.amount;
         runningTotal -= t.amount;
       }
-      data.totalAssets = runningTotal;
+      monthlyData[month].totalAssets = runningTotal;
     });
-
     return Object.entries(monthlyData).map(([name, val]) => ({ name, ...val }));
   }, [transactions, accounts]);
+
+  // Trend Data for Specific Account
+  const accountTrendData = useMemo(() => {
+    if (!trendAccountId) return [];
+    const acc = accounts.find(a => a.id === trendAccountId);
+    if (!acc) return [];
+
+    const now = new Date();
+    let startDate = new Date();
+    if (trendRange === 'week') startDate.setDate(now.getDate() - 7);
+    else if (trendRange === 'month') startDate.setMonth(now.getMonth() - 1);
+    else if (trendRange === 'halfYear') startDate.setMonth(now.getMonth() - 6);
+    else if (trendRange === 'year') startDate.setFullYear(now.getFullYear() - 1);
+
+    const data: Record<string, number> = {};
+    const filteredT = transactions.filter(t => t.accountId === trendAccountId).sort((a, b) => a.date.localeCompare(b.date));
+    
+    // Initial balance before the window
+    let runningBalance = Number(acc.initialBalance);
+    filteredT.forEach(t => {
+      const tDate = new Date(t.date);
+      if (tDate < startDate) {
+        if (t.type === 'income') runningBalance += t.amount;
+        else runningBalance -= t.amount;
+      }
+    });
+
+    // We want a point for every day in the range to make the line smooth
+    const dayPointer = new Date(startDate);
+    while (dayPointer <= now) {
+      const dateStr = dayPointer.toISOString().split('T')[0];
+      const dayT = filteredT.filter(t => t.date === dateStr);
+      dayT.forEach(t => {
+        if (t.type === 'income') runningBalance += t.amount;
+        else runningBalance -= t.amount;
+      });
+      data[dateStr] = runningBalance;
+      dayPointer.setDate(dayPointer.getDate() + 1);
+    }
+
+    return Object.entries(data).map(([name, value]) => ({ name, value }));
+  }, [trendAccountId, trendRange, transactions, accounts]);
 
   // --- Handlers ---
   const handleAddAccount = () => {
@@ -150,6 +209,8 @@ const App: React.FC = () => {
     setTransactions([newT, ...transactions]);
     setAmount('');
     setNote('');
+    // Reset date to today for next entry
+    setDate(new Date().toISOString().split('T')[0]);
     alert('記下來囉！✨');
   };
 
@@ -162,19 +223,38 @@ const App: React.FC = () => {
     setIsAiLoading(false);
   };
 
+  const enterTrendView = (id: string) => {
+    setTrendAccountId(id);
+    setViewMode('account-trend');
+  };
+
   return (
     <div className="min-h-screen bg-[#FDFCFB] pb-24 text-slate-800">
       {/* Header */}
       <header className="bg-white px-6 pt-8 pb-4 border-b border-orange-50 sticky top-0 z-40">
         <div className="max-w-4xl mx-auto flex justify-between items-end">
-          <div>
-            <h1 className="text-sm font-bold text-orange-400 flex items-center gap-1 mb-1">
-              <Sparkles size={14} /> MY WEALTH
-            </h1>
-            <p className="text-3xl font-black text-slate-900 tracking-tight">
-              ${netAssets.toLocaleString()}
-            </p>
-          </div>
+          {viewMode === 'main' ? (
+            <div>
+              <h1 className="text-sm font-bold text-orange-400 flex items-center gap-1 mb-1">
+                <Sparkles size={14} /> MY WEALTH
+              </h1>
+              <p className="text-3xl font-black text-slate-900 tracking-tight">
+                ${netAssets.toLocaleString()}
+              </p>
+            </div>
+          ) : (
+            <div className="flex items-center gap-4">
+              <button onClick={() => setViewMode('main')} className="p-2 bg-slate-100 rounded-full">
+                <ChevronLeft size={24} />
+              </button>
+              <div>
+                <h1 className="text-sm font-bold text-orange-400 uppercase">財務趨勢</h1>
+                <p className="text-xl font-black text-slate-900">
+                  {accounts.find(a => a.id === trendAccountId)?.name}
+                </p>
+              </div>
+            </div>
+          )}
           <button 
             onClick={() => setCurrentTab('accounts')}
             className="p-3 bg-orange-50 text-orange-500 rounded-2xl hover:bg-orange-100 transition-colors"
@@ -186,19 +266,23 @@ const App: React.FC = () => {
 
       <main className="max-w-4xl mx-auto p-4 space-y-6">
         
-        {/* Dashboard */}
-        {currentTab === 'dashboard' && (
+        {/* View Mode: Main Dashboard */}
+        {viewMode === 'main' && currentTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
             {/* Account Slider */}
             <div className="flex gap-4 overflow-x-auto pb-4 no-scrollbar -mx-4 px-4">
               {accounts.map(acc => (
                 <div 
                   key={acc.id} 
-                  className="min-w-[200px] bg-white p-5 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-between"
+                  onClick={() => enterTrendView(acc.id)}
+                  className="min-w-[200px] bg-white p-5 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-between cursor-pointer hover:scale-[1.02] transition-transform active:scale-95"
                   style={{ borderLeft: `6px solid ${acc.color}` }}
                 >
                   <p className="text-xs font-bold text-slate-400 mb-2 uppercase">{acc.name}</p>
                   <h3 className="text-xl font-bold">${(accountBalances[acc.id] || 0).toLocaleString()}</h3>
+                  <div className="mt-2 text-[10px] font-bold text-orange-400 flex items-center gap-1">
+                    點擊看趨勢 <ArrowRightLeft size={10} />
+                  </div>
                 </div>
               ))}
               {accounts.length === 0 && (
@@ -244,7 +328,7 @@ const App: React.FC = () => {
               </h3>
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={chartData}>
+                  <AreaChart data={mainChartData}>
                     <defs>
                       <linearGradient id="assetGrad" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%" stopColor="#FB923C" stopOpacity={0.2}/>
@@ -257,6 +341,56 @@ const App: React.FC = () => {
                     <Area type="monotone" dataKey="totalAssets" stroke="#FB923C" strokeWidth={4} fill="url(#assetGrad)" />
                   </AreaChart>
                 </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* View Mode: Account Trend */}
+        {viewMode === 'account-trend' && (
+          <div className="space-y-6 animate-in slide-in-from-right-8 duration-500">
+            <div className="bg-white p-8 rounded-[3rem] shadow-sm border border-slate-50">
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-lg font-black text-slate-800">餘額變動曲線</h3>
+                <div className="flex bg-slate-50 p-1 rounded-2xl gap-1">
+                  {(['week', 'month', 'halfYear', 'year'] as TimeRange[]).map(r => (
+                    <button 
+                      key={r}
+                      onClick={() => setTrendRange(r)}
+                      className={`px-3 py-1.5 rounded-xl text-[10px] font-black transition-all ${trendRange === r ? 'bg-orange-500 text-white shadow-md' : 'text-slate-400'}`}
+                    >
+                      {r === 'week' ? '近一週' : r === 'month' ? '近一月' : r === 'halfYear' ? '近半年' : '近一年'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="h-80">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={accountTrendData}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
+                    <XAxis dataKey="name" hide />
+                    <YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94A3B8'}} />
+                    <Tooltip contentStyle={{ borderRadius: '1.5rem', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }} />
+                    <Line 
+                      type="monotone" 
+                      dataKey="value" 
+                      stroke={accounts.find(a => a.id === trendAccountId)?.color || '#FB923C'} 
+                      strokeWidth={4} 
+                      dot={false}
+                      activeDot={{ r: 8, strokeWidth: 0 }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="mt-8 grid grid-cols-2 gap-4">
+                <div className="bg-slate-50 p-4 rounded-3xl">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">目前帳戶餘額</p>
+                  <p className="text-xl font-black text-slate-900">${(accountBalances[trendAccountId!] || 0).toLocaleString()}</p>
+                </div>
+                <div className="bg-orange-50 p-4 rounded-3xl">
+                  <p className="text-[10px] font-bold text-orange-400 uppercase mb-1">交易總筆數</p>
+                  <p className="text-xl font-black text-orange-600">{transactions.filter(t => t.accountId === trendAccountId).length} 筆</p>
+                </div>
               </div>
             </div>
           </div>
@@ -293,7 +427,9 @@ const App: React.FC = () => {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">記帳帳戶</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 flex items-center gap-1">
+                    <CreditCard size={10} /> 記帳帳戶
+                  </label>
                   <select 
                     value={selectedAccountId}
                     onChange={(e) => setSelectedAccountId(e.target.value)}
@@ -304,7 +440,9 @@ const App: React.FC = () => {
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">主分類</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 flex items-center gap-1">
+                    <Sparkles size={10} /> 主分類
+                  </label>
                   <select 
                     value={mainCat}
                     onChange={(e) => { setMainCat(e.target.value); setSubCat(''); }}
@@ -336,14 +474,27 @@ const App: React.FC = () => {
                 </div>
               )}
 
-              <div className="space-y-2">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">備註 (可選)</label>
-                <input 
-                  type="text"
-                  value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                  className="w-full bg-slate-50 border-none rounded-3xl p-5 text-slate-700 font-bold focus:ring-2 focus:ring-orange-200"
-                />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 flex items-center gap-1">
+                    <CalendarIcon size={10} /> 交易日期
+                  </label>
+                  <input 
+                    type="date"
+                    value={date}
+                    onChange={(e) => setDate(e.target.value)}
+                    className="w-full bg-slate-50 border-none rounded-3xl p-5 text-slate-700 font-bold focus:ring-2 focus:ring-orange-200"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4">備註 (可選)</label>
+                  <input 
+                    type="text"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    className="w-full bg-slate-50 border-none rounded-3xl p-5 text-slate-700 font-bold focus:ring-2 focus:ring-orange-200"
+                  />
+                </div>
               </div>
 
               <button 
@@ -356,13 +507,44 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* History Tab */}
-        {currentTab === 'history' && (
+        {/* Records Tab (Formerly History) */}
+        {currentTab === 'records' && (
           <div className="space-y-6 animate-in fade-in duration-500">
-            <h3 className="text-xl font-black text-slate-900 px-2">交易明細</h3>
+            <div className="flex justify-between items-center px-2">
+              <h3 className="text-xl font-black text-slate-900">即時紀錄</h3>
+              <button 
+                onClick={() => setShowFilter(!showFilter)}
+                className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-bold transition-all ${showFilter ? 'bg-orange-500 text-white' : 'bg-white text-slate-400 border border-slate-100'}`}
+              >
+                <Search size={14} /> 按日期檢視
+              </button>
+            </div>
+
+            {showFilter && (
+              <div className="bg-white p-6 rounded-[2.5rem] border border-orange-50 shadow-sm animate-in slide-in-from-top-4 duration-300">
+                <p className="text-[10px] font-bold text-slate-400 uppercase mb-4 tracking-widest">選擇日期範圍 (最多橫跨3個月)</p>
+                <div className="flex items-center gap-4">
+                  <input 
+                    type="date" 
+                    value={filterStartDate}
+                    onChange={(e) => setFilterStartDate(e.target.value)}
+                    className="flex-1 bg-slate-50 border-none rounded-2xl p-3 text-sm font-bold"
+                  />
+                  <span className="text-slate-300 font-bold">至</span>
+                  <input 
+                    type="date" 
+                    value={filterEndDate}
+                    onChange={(e) => setFilterEndDate(e.target.value)}
+                    className="flex-1 bg-slate-50 border-none rounded-2xl p-3 text-sm font-bold"
+                  />
+                </div>
+              </div>
+            )}
+
             <div className="space-y-4">
-              {transactions.map(t => (
-                <div key={t.id} className="bg-white p-5 rounded-[2rem] border border-slate-50 shadow-sm flex justify-between items-center">
+              {!showFilter && <p className="text-[10px] font-bold text-slate-400 uppercase px-4">今日狀況</p>}
+              {filteredTransactions.map(t => (
+                <div key={t.id} className="bg-white p-5 rounded-[2rem] border border-slate-50 shadow-sm flex justify-between items-center group hover:scale-[1.01] transition-transform">
                   <div className="flex items-center gap-4">
                     <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-bold ${t.type === 'income' ? 'bg-emerald-50 text-emerald-500' : 'bg-rose-50 text-rose-500'}`}>
                       {t.type === 'income' ? '↑' : '↓'}
@@ -372,17 +554,22 @@ const App: React.FC = () => {
                       <p className="text-[10px] font-bold text-slate-400 uppercase">
                         {t.date} · {accounts.find(a => a.id === t.accountId)?.name}
                       </p>
+                      {t.note && <p className="text-[10px] text-slate-400 mt-1 italic">{t.note}</p>}
                     </div>
                   </div>
                   <div className="text-right">
                     <p className={`text-lg font-black ${t.type === 'income' ? 'text-emerald-500' : 'text-slate-900'}`}>
                       {t.type === 'income' ? '+' : '-'}${t.amount.toLocaleString()}
                     </p>
-                    <button onClick={() => setTransactions(transactions.filter(x => x.id !== t.id))} className="text-[10px] font-bold text-rose-300 hover:text-rose-500">刪除</button>
+                    <button onClick={() => setTransactions(transactions.filter(x => x.id !== t.id))} className="text-[10px] font-bold text-rose-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity">刪除</button>
                   </div>
                 </div>
               ))}
-              {transactions.length === 0 && <p className="text-center py-20 text-slate-300 font-bold">還沒有任何紀錄唷 🍃</p>}
+              {filteredTransactions.length === 0 && (
+                <div className="text-center py-20 bg-white rounded-[3rem] border border-dashed border-slate-100">
+                  <p className="text-slate-300 font-bold">目前沒有符合範圍的紀錄唷 🍃</p>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -410,17 +597,24 @@ const App: React.FC = () => {
                       <p className="text-xs font-bold text-slate-400">目前餘額：${(accountBalances[acc.id] || 0).toLocaleString()}</p>
                     </div>
                   </div>
-                  <button 
-                    onClick={() => setAccounts(accounts.filter(a => a.id !== acc.id))}
-                    className="opacity-0 group-hover:opacity-100 p-3 text-rose-300 hover:text-rose-500 transition-all"
-                  >
-                    <Trash2 size={18} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => enterTrendView(acc.id)}
+                      className="p-3 text-orange-400 bg-orange-50 rounded-2xl opacity-0 group-hover:opacity-100 transition-all"
+                    >
+                      <ArrowRightLeft size={18} />
+                    </button>
+                    <button 
+                      onClick={() => setAccounts(accounts.filter(a => a.id !== acc.id))}
+                      className="opacity-0 group-hover:opacity-100 p-3 text-rose-300 hover:text-rose-500 transition-all"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
 
-            {/* Initial Onboarding Empty State */}
             {accounts.length === 0 && !isAddingAccount && (
               <div className="text-center py-20 space-y-4">
                 <CreditCard size={48} className="mx-auto text-slate-200" />
@@ -476,7 +670,7 @@ const App: React.FC = () => {
       <nav className="fixed bottom-6 left-6 right-6 z-50">
         <div className="max-w-md mx-auto bg-slate-900/90 backdrop-blur-xl rounded-[2.5rem] p-2 flex justify-between items-center shadow-2xl border border-white/10">
           <button 
-            onClick={() => setCurrentTab('dashboard')}
+            onClick={() => { setCurrentTab('dashboard'); setViewMode('main'); }}
             className={`flex-1 py-4 flex flex-col items-center gap-1 transition-all ${currentTab === 'dashboard' ? 'text-orange-400' : 'text-slate-500'}`}
           >
             <LayoutDashboard size={20} />
@@ -492,11 +686,11 @@ const App: React.FC = () => {
           </button>
 
           <button 
-            onClick={() => setCurrentTab('history')}
-            className={`flex-1 py-4 flex flex-col items-center gap-1 transition-all ${currentTab === 'history' ? 'text-orange-400' : 'text-slate-500'}`}
+            onClick={() => setCurrentTab('records')}
+            className={`flex-1 py-4 flex flex-col items-center gap-1 transition-all ${currentTab === 'records' ? 'text-orange-400' : 'text-slate-500'}`}
           >
             <History size={20} />
-            <span className="text-[8px] font-black uppercase tracking-widest">歷史</span>
+            <span className="text-[8px] font-black uppercase tracking-widest">即時紀錄</span>
           </button>
         </div>
       </nav>
